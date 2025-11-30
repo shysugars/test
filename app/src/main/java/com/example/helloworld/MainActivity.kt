@@ -73,27 +73,37 @@ class MainActivity : AppCompatActivity() {
             Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
         }
     }
-
     private fun runShellCommand() {
-        // 耗时操作必须在子线程执行
         thread {
             try {
-                // Shizuku.newProcess 用法和 Runtime.getRuntime().exec() 基本一致
-                // 这里的 "sh" 运行在 Shizuku 的高权限进程中
-                val process = Shizuku.newProcess(arrayOf("sh", "-c", "ls -l /system"), null, null)
+                // === 修改开始：使用反射绕过 private 限制 ===
+                val command = arrayOf("sh", "-c", "ls -l /system")
                 
-                // 读取输出流
+                // 获取 Shizuku 类中的 newProcess 方法
+                val newProcessMethod = Shizuku::class.java.getDeclaredMethod(
+                    "newProcess",
+                    Array<String>::class.java, // cmd 类型
+                    Array<String>::class.java, // env 类型
+                    String::class.java         // dir 类型
+                )
+                
+                // 强制设置为可访问（关键步骤）
+                newProcessMethod.isAccessible = true
+                
+                // 执行方法: newProcess(command, null, null)
+                val process = newProcessMethod.invoke(null, command, null, null) as Process
+                // === 修改结束 ===
+
+                // 下面是通用的读取输出代码
                 val reader = BufferedReader(InputStreamReader(process.inputStream))
                 val output = StringBuilder()
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
                     output.append(line).append("\n")
                 }
-                
-                // 等待命令结束
+
                 val exitCode = process.waitFor()
-                
-                // 更新 UI
+
                 runOnUiThread {
                     tvOutput.text = "Exit Code: $exitCode\n\n$output"
                 }
@@ -101,7 +111,7 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 e.printStackTrace()
                 runOnUiThread {
-                    tvOutput.text = "执行出错: ${e.message}"
+                    tvOutput.text = "执行出错: ${e.message}\n\n请确保 Shizuku App 正在运行。"
                 }
             }
         }
