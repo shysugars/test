@@ -1,106 +1,108 @@
 package com.example.helloworld
 
 
-import android.content.Intent
-import android.os.Build
+
+import android.content.pm.PackageManager
 import android.os.Bundle
-import android.provider.Settings
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
-import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
-import androidx.biometric.BiometricPrompt
-import androidx.core.content.ContextCompat
-import java.util.concurrent.Executor
+import rikka.shizuku.Shizuku
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var executor: Executor
-    private lateinit var biometricPrompt: BiometricPrompt
-    private lateinit var promptInfo: BiometricPrompt.PromptInfo
+    private lateinit var tvOutput: TextView
+    private lateinit var btnRun: Button
+
+    // 定义权限请求结果监听器
+    private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+        if (grantResult == PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "权限已授予", Toast.LENGTH_SHORT).show()
+            // 权限授予后自动执行
+            runShellCommand()
+        } else {
+            Toast.makeText(this, "权限被拒绝", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        val tvStatus = findViewById<TextView>(R.id.tv_status)
-        val btnAuth = findViewById<Button>(R.id.btn_authenticate)
+        tvOutput = findViewById(R.id.tvOutput)
+        btnRun = findViewById(R.id.btnRun)
 
-        // 1. 初始化 Executor (用于在主线程回调)
-        executor = ContextCompat.getMainExecutor(this)
+        // 注册监听器
+        Shizuku.addRequestPermissionResultListener(permissionListener)
 
-        // 2. 配置回调处理 (成功、错误、失败)
-        biometricPrompt = BiometricPrompt(this, executor,
-            object : BiometricPrompt.AuthenticationCallback() {
-                
-                // 验证错误 (如: 用户取消、尝试次数过多被锁定)
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    super.onAuthenticationError(errorCode, errString)
-                    tvStatus.text = "验证错误: $errString"
-                    Toast.makeText(applicationContext, "验证错误: $errString", Toast.LENGTH_SHORT).show()
-                }
-
-                // 验证成功
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    super.onAuthenticationSucceeded(result)
-                    tvStatus.text = "验证成功！已通过指纹/生物识别"
-                    tvStatus.setTextColor(ContextCompat.getColor(applicationContext, android.R.color.holo_green_dark))
-                    Toast.makeText(applicationContext, "验证通过", Toast.LENGTH_SHORT).show()
-                }
-
-                // 验证失败 (如: 指纹不匹配，但可以重试)
-                override fun onAuthenticationFailed() {
-                    super.onAuthenticationFailed()
-                    tvStatus.text = "验证失败: 指纹不匹配，请重试"
-                    Toast.makeText(applicationContext, "指纹不匹配", Toast.LENGTH_SHORT).show()
-                }
-            })
-
-        // 3. 配置弹窗信息
-        promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("指纹登录")
-            .setSubtitle("请验证指纹以继续")
-            .setNegativeButtonText("取消") // 如果允许使用密码，可以使用 setAllowedAuthenticators
-            .build()
-
-        // 4. 按钮点击事件
-        btnAuth.setOnClickListener {
-            checkAndAuthenticate()
+        btnRun.setOnClickListener {
+            checkAndStart()
         }
     }
 
-    private fun checkAndAuthenticate() {
-        val biometricManager = BiometricManager.from(this)
-        
-        // 检查设备是否支持生物识别
-        when (biometricManager.canAuthenticate(BIOMETRIC_STRONG)) {
-            BiometricManager.BIOMETRIC_SUCCESS -> {
-                // 设备支持且已录入指纹 -> 发起验证
-                biometricPrompt.authenticate(promptInfo)
-            }
-            BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE -> {
-                Toast.makeText(this, "设备没有生物识别硬件", Toast.LENGTH_LONG).show()
-            }
-            BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE -> {
-                Toast.makeText(this, "生物识别硬件当前不可用", Toast.LENGTH_LONG).show()
-            }
-            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> {
-                // 提示用户去设置中录入指纹
-                Toast.makeText(this, "您尚未录入指纹，请去设置中添加", Toast.LENGTH_LONG).show()
+    override fun onDestroy() {
+        super.onDestroy()
+        // 记得移除监听器，防止内存泄漏
+        Shizuku.removeRequestPermissionResultListener(permissionListener)
+    }
+
+    private fun checkAndStart() {
+        // 1. 检查 Shizuku 服务是否存活 (用户是否已激活 Shizuku)
+        if (!Shizuku.pingBinder()) {
+            tvOutput.text = "Shizuku 服务未运行，请先在 Shizuku APP 中启动服务。"
+            return
+        }
+
+        // 2. 检查是否有权限
+        if (checkPermission()) {
+            runShellCommand()
+        } else {
+            // 3. 请求权限 (requestCode 自定义，这里填 0)
+            Shizuku.requestPermission(0)
+        }
+    }
+
+    private fun checkPermission(): Boolean {
+        return if (Shizuku.isPreV11()) {
+            false
+        } else {
+            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun runShellCommand() {
+        // 耗时操作必须在子线程执行
+        thread {
+            try {
+                // Shizuku.newProcess 用法和 Runtime.getRuntime().exec() 基本一致
+                // 这里的 "sh" 运行在 Shizuku 的高权限进程中
+                val process = Shizuku.newProcess(arrayOf("sh", "-c", "ls -l /system"), null, null)
                 
-                // (可选) 跳转到系统安全设置页面
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    val enrollIntent = Intent(Settings.ACTION_BIOMETRIC_ENROLL).apply {
-                        putExtra(Settings.EXTRA_BIOMETRIC_AUTHENTICATORS_ALLOWED, BIOMETRIC_STRONG)
-                    }
-                    startActivityForResult(enrollIntent, 100)
+                // 读取输出流
+                val reader = BufferedReader(InputStreamReader(process.inputStream))
+                val output = StringBuilder()
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    output.append(line).append("\n")
                 }
-            }
-            else -> {
-                Toast.makeText(this, "您的设备暂不支持生物识别", Toast.LENGTH_SHORT).show()
+                
+                // 等待命令结束
+                val exitCode = process.waitFor()
+                
+                // 更新 UI
+                runOnUiThread {
+                    tvOutput.text = "Exit Code: $exitCode\n\n$output"
+                }
+
+            } catch (e: Exception) {
+                e.printStackTrace()
+                runOnUiThread {
+                    tvOutput.text = "执行出错: ${e.message}"
+                }
             }
         }
     }
